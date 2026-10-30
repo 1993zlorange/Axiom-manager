@@ -68,7 +68,22 @@ class GitTests(unittest.TestCase):
         self.write("README.md", "# Demo\n\n实际安装和使用说明。\n")
         self.write("VERSION", "0.1.0\n")
         self.write("CHANGELOG.md", "# 更新日志\n\n## [Unreleased]\n\n### 新增\n\n- 支持项目检查。\n")
+        self.write(".gitignore", ".axiom-manager/backups/\n")
         self.config()
+        # 测试项目显式约定输入文件和安装文件的位置，未知类别仍应失败。
+        fixture_policy = {
+            "schema": 1,
+            "rules": [
+                {"id": "root", "paths": ["AGENTS.md", "README.md", "CHANGELOG.md", "VERSION", ".gitignore", "package.json", "package-lock.json", "npm-shrinkwrap.json", "pyproject.toml"],
+                 "name_pattern": r"(?:AGENTS\.md|README\.md|CHANGELOG\.md|VERSION|\.gitignore|package\.json|package-lock\.json|npm-shrinkwrap\.json|pyproject\.toml)",
+                 "naming": "使用测试项目的固定入口和版本文件名称", "purpose": "测试仓库的说明、文件规则和版本来源"},
+                {"id": "fixtures", "paths": ["*.txt"], "name_pattern": r"[^/]+\.txt", "naming": "根目录 .txt 文件；特意覆盖中文和特殊字符", "purpose": "Git 路径、重命名和用户改动的测试输入"},
+                {"id": "manager", "paths": [".axiom-manager/config.json", ".axiom-manager/manage.py", ".axiom-manager/install-state.json"],
+                 "name_pattern": r"(?:config\.json|manage\.py|install-state\.json)", "naming": "沿用工具固定名称", "purpose": "安装后的独立运行脚本和设置"},
+            ],
+            "excluded": manager.LAYOUT_EXCLUSIONS,
+        }
+        self.write("AGENTS.md", manager.render_layout(fixture_policy))
         self.git("add", ".")
         self.git("commit", "-m", "feat: 添加项目初始功能")
 
@@ -142,6 +157,14 @@ class GitTests(unittest.TestCase):
         self.assertEqual(self.commit_change(), 1)
         self.assertEqual(self.git("rev-parse", "HEAD"), before)
         self.assertEqual(self.git("diff", "--cached", "--name-only"), "")
+
+    def test_files_created_by_checks_need_layout_source(self):
+        self.config(checks=[["{python}", "-c", "from pathlib import Path; Path('unclassified.bin').write_bytes(b'data')"]])
+        before = self.git("rev-parse", "HEAD")
+        self.assertEqual(self.commit_change(), 1)
+        self.assertEqual(self.git("rev-parse", "HEAD"), before)
+        self.assertEqual(self.git("diff", "--cached", "--name-only"), "")
+        self.assertIn("没有存放规则出处", self.output.getvalue())
 
     def test_no_checks_requires_explicit_reason(self):
         self.config(checks=[])
@@ -352,6 +375,7 @@ class GitTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_installed_workflow_commit_release_and_uninstall(self):
+        original_agents = (self.root / "AGENTS.md").read_bytes()
         installer.install(self.root, write=True)
         script = self.root / ".axiom-manager/manage.py"
 
@@ -367,7 +391,7 @@ class GitTests(unittest.TestCase):
         self.assertEqual(self.git("status", "--short"), "")
         installer.uninstall(self.root, write=True)
         self.assertFalse(script.exists())
-        self.assertFalse((self.root / "AGENTS.md").exists())
+        self.assertEqual((self.root / "AGENTS.md").read_bytes(), original_agents)
         self.assertTrue((self.root / manager.CONFIG_PATH).exists())
 
     def test_push_to_local_bare_remote_and_retry(self):

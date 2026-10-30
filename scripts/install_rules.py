@@ -11,9 +11,11 @@ from pathlib import Path
 import sys
 
 try:
-    from .manage_project import DEFAULT_CONFIG, ManagerError, atomic_write, load_config, read_text, safe_path
+    from .manage_project import (DEFAULT_CONFIG, ManagerError, atomic_write, bootstrap_layout, layout_span,
+                                load_config, parse_layout, read_text, render_layout, safe_path)
 except ImportError:
-    from manage_project import DEFAULT_CONFIG, ManagerError, atomic_write, load_config, read_text, safe_path
+    from manage_project import (DEFAULT_CONFIG, ManagerError, atomic_write, bootstrap_layout, layout_span,
+                                load_config, parse_layout, read_text, render_layout, safe_path)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -145,6 +147,17 @@ def install(root: Path, *, write: bool = False) -> None:
     old = read_text(agents) if agents.exists() else ""
     found = find_block(old)
     block = read_text(ROOT / "assets/agents-block.md").strip()
+    layout = layout_span(old)
+    if layout:
+        parse_layout(old)
+        if found and found[0] <= layout[0] < layout[1] <= found[1]:
+            # 项目专属文件规则不是工具模板，升级时保留其原内容。
+            block += "\n\n" + old[layout[0]:layout[1]].strip()
+        elif found and max(found[0], layout[0]) < min(found[1], layout[1]):
+            raise ManagerError("文件规则块跨越安装块边界；请先整理标记，原文件保持不变")
+    else:
+        planned = ["AGENTS.md", STATE, *MANAGED]
+        block += "\n\n" + render_layout(bootstrap_layout(root, planned)).strip()
     eol = "\r\n" if "\r\n" in old else "\n"
     rendered = (BEGIN + "\n" + block.replace("\r\n", "\n") + "\n" + END + "\n").replace("\n", eol)
     separator = state["separator"] if state else ""

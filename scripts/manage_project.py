@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,16 @@ DEFAULT_CONFIG = {
     "sync_version_files": [],
 }
 CONFIG_PATH = ".axiom-manager/config.json"
+LAYOUT_BEGIN = "<!-- Axiom-manager:file-layout:begin -->"
+LAYOUT_END = "<!-- Axiom-manager:file-layout:end -->"
+LAYOUT_EXCLUSIONS = [
+    {"path": "**/__pycache__/**", "reason": "Python 自动生成的解释器缓存"},
+    {"path": ".axiom-manager/backups/**", "reason": "安装、升级和卸载生成的原件备份", "task": "安装恢复"},
+    {"path": ".axiom-manager-install.lock", "reason": "安装期间的临时并发锁"},
+    {"path": "node_modules/**", "reason": "包管理器生成的依赖目录"},
+    {"path": ".venv/**", "reason": "Python 虚拟环境"},
+    {"path": ".pytest_cache/**", "reason": "pytest 自动缓存"},
+]
 SEMVER = re.compile(
     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
@@ -45,6 +56,192 @@ class ManagerError(Exception):
 
 def read_text(path: Path) -> str:
     return path.read_bytes().decode("utf-8")
+
+
+def layout_span(text: str) -> tuple[int, int] | None:
+    offset = 1 if text.startswith("\ufeff") else 0
+    searchable = text[offset:]
+    starts = list(re.finditer(r"^" + re.escape(LAYOUT_BEGIN) + r"\r?$", searchable, re.M))
+    ends = list(re.finditer(r"^" + re.escape(LAYOUT_END) + r"\r?$", searchable, re.M))
+    if not starts and not ends:
+        return None
+    if len(starts) != 1 or len(ends) != 1 or starts[0].end() >= ends[0].start():
+        raise ManagerError("AGENTS.md 的文件命名与存放规则标记重复、不完整或顺序错误")
+    stop = ends[0].end() + offset
+    if text[stop:stop + 1] == "\n":
+        stop += 1
+    return starts[0].start() + offset, stop
+
+
+def path_matches(path: str, pattern: str) -> bool:
+    """按项目根目录匹配；* 不跨目录，** 匹配零层或多层目录。"""
+    parts, tokens = path.split("/"), pattern.split("/")
+    from functools import lru_cache
+
+    @lru_cache(None)
+    def match(i: int, j: int) -> bool:
+        if j == len(tokens):
+            return i == len(parts)
+        if tokens[j] == "**":
+            return match(i, j + 1) or (i < len(parts) and match(i + 1, j))
+        return i < len(parts) and fnmatch.fnmatchcase(parts[i], tokens[j]) and match(i + 1, j + 1)
+
+    return match(0, 0)
+
+
+def validate_layout_pattern(pattern: str) -> None:
+    if (not isinstance(pattern, str) or not pattern or "\\" in pattern
+            or pattern.startswith("/") or ":" in pattern or ".." in pattern.split("/")
+            or any(not part or part == "." for part in pattern.split("/"))
+            or all(part in {"*", "**"} for part in pattern.split("/"))
+            or pattern.split("/")[0].lower() == ".git"):
+        raise ManagerError(f"文件规则路径必须限定项目内的具体位置或类别，不能无限制兜底：{pattern}")
+
+
+def parse_layout(text: str) -> dict:
+    span = layout_span(text)
+    if span is None:
+        raise ManagerError("AGENTS.md 缺少可检查的文件命名与存放规则；先阅读已有说明，再运行 layout --init 生成初稿并按项目用途核对")
+    block = text[span[0]:span[1]]
+    fences = re.findall(r"^```json\s*\r?\n(.*?)^```\s*$", block, re.M | re.S)
+    if len(fences) != 1:
+        raise ManagerError("文件命名与存放规则块必须包含一份 json 规则")
+    try:
+        policy = json.loads(fences[0])
+    except ValueError as exc:
+        raise ManagerError(f"文件命名与存放规则 JSON 无效：{exc}") from exc
+    if (not isinstance(policy, dict) or type(policy.get("schema")) is not int or policy["schema"] != 1
+            or not isinstance(policy.get("rules"), list) or not policy["rules"]
+            or not isinstance(policy.get("excluded", []), list)):
+        raise ManagerError("文件规则需包含 schema: 1、非空 rules 数组及可选 excluded 数组")
+    ids = set()
+    for rule in policy["rules"]:
+        if not isinstance(rule, dict) or any(not isinstance(rule.get(field), str) or not rule[field].strip()
+                                             for field in ("id", "name_pattern", "naming", "purpose")):
+            raise ManagerError("每条文件规则需写明 id、name_pattern、naming（命名说明）和 purpose（用途出处）")
+        if rule["id"] in ids:
+            raise ManagerError(f"文件规则 id 重复：{rule['id']}")
+        ids.add(rule["id"])
+        if not isinstance(rule.get("paths"), list) or not rule["paths"]:
+            raise ManagerError(f"文件规则 {rule['id']} 缺少 paths")
+        for pattern in rule["paths"]:
+            validate_layout_pattern(pattern)
+        try:
+            re.compile(rule["name_pattern"])
+        except re.error as exc:
+            raise ManagerError(f"文件规则 {rule['id']} 的命名正则无效：{exc}") from exc
+        if "task" in rule and (not isinstance(rule["task"], str) or not rule["task"].strip()):
+            raise ManagerError(f"特殊任务规则 {rule['id']} 需写明 task")
+    for item in policy.get("excluded", []):
+        if not isinstance(item, dict) or not isinstance(item.get("reason"), str) or not item["reason"].strip():
+            raise ManagerError("每个排除目录或文件必须说明 reason，不能隐藏未归类文件")
+        validate_layout_pattern(item.get("path"))
+    return policy
+
+
+def render_layout(policy: dict, eol: str = "\n") -> str:
+    text = (LAYOUT_BEGIN + "\n## 文件命名与存放规则\n\n"
+            "以下规则是文件位置、命名和用途出处的依据。新文件应匹配具体规则；特殊任务在 task 中说明并使用专门路径。"
+            "每次修改及 README 更新后复核；新类别按实际职责补充，不用宽泛兜底掩盖错误命名或错放。\n\n```json\n"
+            + json.dumps(policy, ensure_ascii=False, indent=2) + "\n```\n" + LAYOUT_END + "\n")
+    return text.replace("\n", eol)
+
+
+def inventory_files(root: Path, excluded: list[dict]) -> list[str]:
+    files = []
+    def skip(path: str) -> bool:
+        return any(path_matches(path, item["path"]) for item in excluded)
+
+    def scan_error(error: OSError) -> None:
+        raise ManagerError(f"无法检查项目文件：{error}")
+
+    for folder, directories, names in os.walk(root, followlinks=False, onerror=scan_error):
+        base = Path(folder)
+        for directory in list(directories):
+            path = base / directory
+            rel = path.relative_to(root).as_posix()
+            if directory.lower() == ".git" or skip(rel):
+                directories.remove(directory)
+            elif path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+                files.append(rel)
+                directories.remove(directory)
+        for name in names:
+            rel = (base / name).relative_to(root).as_posix()
+            if name.lower() != ".git" and not skip(rel):
+                files.append(rel)
+    return sorted(files)
+
+
+def bootstrap_layout(root: Path, planned: list[str] | None = None) -> dict:
+    files = set(inventory_files(root, LAYOUT_EXCLUSIONS))
+    files.update(planned or [])
+    files.update(("AGENTS.md", "README.md", "CHANGELOG.md", "VERSION"))
+    groups: dict[str, list[str]] = {}
+    for name in sorted(files):
+        parent = Path(name).parent.as_posix()
+        groups.setdefault(parent, []).append(name)
+    rules = []
+    for i, (parent, paths) in enumerate(sorted(groups.items()), 1):
+        # 初始只列出现有和明确计划的文件，避免自动为未知新文件放行。
+        names = [Path(name).name for name in paths]
+        rules.append({
+            "id": f"existing-{i}", "paths": [name.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]") for name in paths],
+            "name_pattern": "(?:" + "|".join(re.escape(name) for name in names) + ")",
+            "naming": "沿用所列现有文件的精确名称；增加文件时按实际职责补充命名规则",
+            "purpose": "项目根目录的现有入口和约定文件" if parent == "." else f"当前项目 {parent}/ 目录中的文件，依据安装或初始化时的结构登记",
+        })
+    return {"schema": 1, "rules": rules, "excluded": [dict(item) for item in LAYOUT_EXCLUSIONS]}
+
+
+def audit_layout(root: Path, *, verbose: bool = False) -> dict[str, str]:
+    agents = safe_path(root, "AGENTS.md")
+    policy = parse_layout(read_text(agents) if agents.exists() else "")
+    results = {}
+    problems = []
+    for path in inventory_files(root, policy.get("excluded", [])):
+        matches = [rule for rule in policy["rules"] if any(path_matches(path, pattern) for pattern in rule["paths"])]
+        if not matches:
+            problems.append(f"{path}：没有存放规则出处；补充具体类别或修正位置")
+        elif len(matches) > 1:
+            problems.append(f"{path}：同时匹配多条规则（{', '.join(rule['id'] for rule in matches)}）；请明确唯一归属")
+        elif not re.fullmatch(matches[0]["name_pattern"], Path(path).name):
+            problems.append(f"{path}：命名不符合规则 {matches[0]['id']}（{matches[0]['naming']}）")
+        else:
+            results[path] = matches[0]["id"]
+    if problems:
+        detail = "\n".join(problems[:30])
+        if len(problems) > 30:
+            detail += f"\n另有 {len(problems) - 30} 个问题，请逐项处理后重查"
+        raise ManagerError("文件命名与存放检查未通过：\n" + detail)
+    if verbose:
+        for path, source in results.items():
+            print(f"{path} → AGENTS.md / {source}")
+    print(f"文件规则：通过，{len(results)} 个文件均有唯一存放出处且符合命名要求")
+    return results
+
+
+def initialize_layout(root: Path, *, write: bool = False) -> None:
+    agents = safe_path(root, "AGENTS.md")
+    old = read_text(agents) if agents.exists() else ""
+    if layout_span(old):
+        parse_layout(old)
+        print("unchanged：已有文件规则；请按检查结果定向修订，初始化不会覆盖已有约定")
+        return
+    eol = "\r\n" if "\r\n" in old else "\n"
+    policy = bootstrap_layout(root)
+    block = render_layout(policy, eol)
+    if not write:
+        print("文件规则初稿（未写入，请结合现有文字规则核对用途和特殊任务）：\n" + block)
+        return
+    if (read_text(agents) if agents.exists() else "") != old:
+        raise ManagerError("AGENTS.md 在预检后发生变化，请重试")
+    if agents.exists():
+        stamp = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).strftime("%Y%m%d-%H%M%S-%f")
+        backup = safe_path(root, f".axiom-manager/backups/{stamp}/AGENTS.md")
+        atomic_write(backup, agents.read_bytes())
+    separator = "" if not old or old.endswith(eol * 2) else (eol if old.endswith(eol) else eol * 2)
+    atomic_write(agents, (old + separator + block).encode("utf-8"))
+    print("已在 AGENTS.md 建立文件规则初稿；现有文字保持原样，请结合实际用途检查并细化")
 
 
 def safe_path(root: Path, relative: str) -> Path:
@@ -371,6 +568,7 @@ def lock_updates(root: Path, paths: list[str], current: Version, new: Version) -
 
 
 def project_checks(root: Path, config: dict, reason: str | None) -> None:
+    audit_layout(root)
     readme_check(root)
     current, paths = version_files(root, config)
     lock_updates(root, paths, current, current)
@@ -387,6 +585,7 @@ def project_checks(root: Path, config: dict, reason: str | None) -> None:
         if result.stderr.strip():
             print(result.stderr.rstrip())
     # 验证命令可能修改文件，结束后再次检查文件结构和版本一致性。
+    audit_layout(root)
     readme_check(root)
     current, paths = version_files(root, config)
     lock_updates(root, paths, current, current)
@@ -657,6 +856,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--project", default=".", help="项目根目录，默认当前目录；放在子命令之前")
     subs = p.add_subparsers(dest="command", required=True)
     subs.add_parser("status", help="显示 Git 状态、当前版本和项目配置")
+    layout = subs.add_parser("layout", help="检查每个文件的命名和存放出处，或按项目现状初始化规则")
+    layout.add_argument("--init", action="store_true", help="仅在缺少规则时，根据当前文件生成初稿")
+    layout.add_argument("--write", action="store_true", help="初始化时实际写入 AGENTS.md；默认预览")
+    layout.add_argument("--verbose", action="store_true", help="逐个显示文件对应的规则 id")
     c = subs.add_parser("check", help="运行文档、版本和已配置的项目验证命令")
     c.add_argument("--no-checks-reason", help="未配置验证命令时，说明原因和实际检查方法")
     lint = subs.add_parser("lint-message", help="校验中文约定式提交信息")
@@ -697,7 +900,14 @@ def main(argv: list[str] | None = None) -> int:
             print("提交信息：通过")
             return 0
         config = load_config(root)
-        if args.command == "status":
+        if args.command == "layout":
+            if args.init:
+                initialize_layout(root, write=args.write)
+            elif args.write:
+                raise ManagerError("layout --write 只与 --init 一起使用；已有规则由助手按检查结果修订")
+            else:
+                audit_layout(root, verbose=args.verbose)
+        elif args.command == "status":
             repo_root(root)
             version, paths = version_files(root, config)
             print(f"项目：{root}\n当前版本：{version}（{', '.join(paths)}）\n自动推送：{config['auto_push']}\n验证命令：{len(config['checks'])} 条")

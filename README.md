@@ -1,8 +1,8 @@
 # Axiom-manager
 
-把任务完成后 Git 提交、中文 Commit、语义化版本和 README 更新规则安装到项目的 `AGENTS.md`，并提供可独立运行的校验脚本。
+把任务完成后 Git 提交、中文 Commit、语义化版本、README 更新及文件命名与存放规则安装到项目的 `AGENTS.md`，并提供可独立运行的校验脚本。
 
-安装后，读取 `AGENTS.md` 的编码助手按“完成修改 → 验证 → 同步相关文档 → 中文 Commit → 本地提交”的顺序工作。默认只提交本地；推送可配置。任务提交和版本发布分别执行，日常提交不自动增加版本号。
+安装后，读取 `AGENTS.md` 的编码助手按“完成修改 → 核对文件规则 → 同步相关文档并复核 → 验证 → 中文 Commit → 本地提交”的顺序工作。每次任务更新及 README 修改后，先核对 AGENTS.md 的命名与存放说明，确保每个文件有符合要求的位置、名称和用途出处。默认只提交本地；推送可配置。任务提交和版本发布分别执行，日常提交不自动增加版本号。
 
 需要 **Python 3.11+**；提交、发布和推送还需要 Git。使用 Python 标准库，无第三方 Python 依赖。Windows 使用 `python`，Linux/macOS 可改为 `python3`。
 
@@ -33,13 +33,15 @@ python E:/zl/01-Project/axiom-manager/scripts/install_rules.py E:/work/my-projec
 
 | 目标文件 | 行为 |
 |---|---|
-| `AGENTS.md` | 创建或替换 `<!-- Axiom-manager:begin/end -->` 独立标记块，保留其他内容及 Axiom-reporter 规则 |
+| `AGENTS.md` | 更新独立工具规则块；缺少文件规则时按项目现状生成初稿，升级时保留项目专属文件规则及其他原文 |
 | `.axiom-manager/manage.py` | 安装独立运行脚本；更新时保护本地修改 |
 | `.axiom-manager/config.json` | 首次生成配置；重新安装保留用户设置 |
 | `.axiom-manager/install-state.json` | 记录安装版本、文件来源和哈希，用于更新与卸载 |
 | `.axiom-manager/backups/` | 有旧文件发生变化时，先保存原始字节；备份不应提交 Git |
 
 建议把 `.axiom-manager/backups/` 加入目标项目 `.gitignore`，其余规则、脚本、配置和安装记录可随项目提交。规则模板只有一份：[assets/agents-block.md](assets/agents-block.md)。安装器不会覆盖目标项目的 README、CHANGELOG 或现有版本文件。
+
+初次安装后，助手需阅读目标项目已有的命名和位置说明，结合实际文件用途核对自动生成的初稿；已有文字约定保持有效。安装器不会自动重命名、搬动项目文件，也不会在升级时用新模板重置项目专属文件规则。
 
 ## 配置验证和推送
 
@@ -72,12 +74,65 @@ python E:/zl/01-Project/axiom-manager/scripts/install_rules.py E:/work/my-projec
 
 Node 项目可以运行平台实际可执行的程序，例如 Windows 的 `npm.cmd` 或 `pnpm.cmd`，Linux/macOS 的 `npm` 或 `pnpm`。shell 管道、重定向和脚本字符串不会自动解释；需要复杂操作时调用项目自己的脚本。
 
+## 文件命名、位置与特殊任务
+
+项目的文件规则保存在 **AGENTS.md 本身**，说明文件可放在哪里、如何命名、用途是什么。不要另外创建 `agent.md` 或大小写不同的副本。
+
+每次更新完成及 README 修改后，执行以下步骤：
+
+1. 先阅读 AGENTS.md 中的现有说明，检查是否同时包含命名和存放要求；缺少时根据实际文件建立，保留已有合理约定。
+2. 逐项检查当前文件，包括新文件和未提交文件。没有规则出处、命名不符或多条规则重叠时，先处理再提交。
+3. 合理的新类别补充具体位置、命名示例和用途；文件确实错放或命名不规范时，修正文件及引用，不用宽泛规则掩盖问题。
+4. 有特殊任务时，按任务约定专门位置和命名规则。例如界面验收截图、实验结果或交付包，应采用该项目实际需要的位置；不凭空建空目录。
+5. 同步 README 和相关说明，再次检查所有文件的命名和出处，通过后与修改内容一并提交。
+
+```powershell
+# 查看每个文件对应的 AGENTS.md 规则
+python .axiom-manager/manage.py layout --verbose
+
+# 旧项目尚无可检查的规则时，先按当前项目生成初稿
+python .axiom-manager/manage.py layout --init
+python .axiom-manager/manage.py layout --init --write
+```
+
+`--init` 默认预览，`--write` 才写入 AGENTS.md 并在修改前备份。已有可检查规则时初始化显示 `unchanged`，不会借重新初始化为新文件自动放行；应按检查结果修订具体规则。初稿按现有目录分组、逐个登记已有文件的名称；用途来自当前结构，仍需助手阅读内容后细化，不能将初稿视为对命名合理性的自动认定。
+
+文件规则使用独立标记块中的 JSON，核心字段如下：
+
+| 字段 | 说明 |
+|---|---|
+| `id` / `paths` | 唯一规则标识和相对项目根目录的路径模式；`*` 不跨目录，`**` 可跨多层 |
+| `name_pattern` / `naming` | 匹配文件名的完整正则及可读的中文命名说明 |
+| `purpose` | 文件职责和存放依据；检查结果会显示文件对应的规则 id |
+| `task` | 特殊任务名称，与专门路径和命名规则一起使用 |
+| `excluded` | 生成目录或文件的具体路径及 `reason`；例如缓存、依赖和安装备份 |
+
+例如，项目确有界面验收截图任务时，可以在 `rules` 中增加：
+
+```json
+{
+  "id": "ui-evidence",
+  "paths": ["tests/evidence/ui/*.png"],
+  "name_pattern": "[a-z0-9]+(?:_[a-z0-9]+)*_step_[0-9]{2}\\.png",
+  "naming": "功能名_step_两位步骤号.png，例如 login_step_01.png",
+  "purpose": "界面验收步骤对应的截图原件",
+  "task": "界面验收截图"
+}
+```
+
+该例只供有此任务的项目采用。普通规则与特殊任务规则应划清路径，保证同一文件只匹配一条规则。不能用 `*`、`**/*` 等整个项目兜底路径，也不能无理由排除未归类文件。
+
+检查范围包括项目内当前文件，不会仅因 `.gitignore` 忽略就跳过。Git 内部数据库不属于项目文件；依赖、缓存和安装备份按规则中明确的路径及原因排除。目录链接本身需要归属，检查不会跟随链接读取项目外文件。命令在项目验证前后各复核一次；验证命令产生的新文件也必须有规则出处。
+
+脚本检查路径、命名、必填用途和唯一归属；“用途是否准确、特殊任务位置是否合理”由助手结合实际项目判断。只读来源原件和用户已有修改仍按原有权限保留，不因整理规则擅自删除或搬动。
+
 ## 检查与提交
 
 在目标项目根目录运行：
 
 ```powershell
 python .axiom-manager/manage.py status
+python .axiom-manager/manage.py layout --verbose
 python .axiom-manager/manage.py check
 
 # 预览本次提交；逐个列出文件
@@ -163,7 +218,7 @@ README 按实际项目保留合理结构，介绍用途、安装、使用、配�
 
 发布时保留一个空待发布段，将内容归入 `## [版本] - YYYY-MM-DD`，日期为 Asia/Shanghai。缺少 CHANGELOG 时可以创建；已有文件必须包含独立的 `## [Unreleased]` 或 `## [待发布]`，其他自定义结构先由助手整理。待发布段为空时从 `feat/fix/perf` 和不兼容提交整理简短说明；复杂迁移应事先人工补充。同一目标版本从预发布转为正式版时，累计该版本全部预发布说明并去重；没有新增变化的后续预发布沿用上一版说明。历史已发布记录保持原样。
 
-脚本检查非空 README、Markdown 行内本地链接、版本一致性以及配置的验证命令；不会自动验证远端链接、参考式链接或判断文档语义。说明准确性和应更新哪些章节由助手结合实际差异检查。
+脚本检查 AGENTS.md 中每个文件的命名与存放出处、非空 README、Markdown 行内本地链接、版本一致性以及配置的验证命令；不会自动验证远端链接、参考式链接或判断文档语义。说明准确性和应更新哪些章节由助手结合实际差异检查。
 
 ## 推送与失败重试
 
@@ -192,7 +247,7 @@ python E:/zl/01-Project/axiom-manager/scripts/install_rules.py E:/work/my-projec
 python E:/zl/01-Project/axiom-manager/scripts/install_rules.py E:/work/my-project --uninstall --write
 ```
 
-卸载保留用户修改过的文件、安装前已有的配置、备份和其他规则。保留自定义文件时也保留安装记录。空目录可检查后手动清理。若需要回到安装前的 AGENTS.md，可核对 `.axiom-manager/backups/` 中的原件；恢复整份文件前先保留安装后的其他修改。
+卸载移除 Axiom-manager 工具块，包括在该块内首次生成的文件规则；块外已有的项目规则保持原样。需要继续保留块内项目文件规则时，应先将其完整移到块外再卸载。用户修改过的运行文件、安装前已有的配置、备份和其他规则保留，保留自定义运行文件时也保留安装记录。空目录可检查后手动清理。若需要回到安装前的 AGENTS.md，可核对 `.axiom-manager/backups/` 中的原件；恢复整份文件前先保留安装后的其他修改。
 
 锁文件用于排除同工具并发操作。异常中止后，如果确认相关进程已经结束，检查并移除目标根目录 `.axiom-manager-install.lock` 或 Git 目录中的 `axiom-manager.lock`。安装器更新关键文件时先备份并采用临时文件替换，失败时尝试恢复已修改文件。
 
@@ -202,12 +257,13 @@ python E:/zl/01-Project/axiom-manager/scripts/install_rules.py E:/work/my-projec
 
 ```powershell
 python -m unittest discover -s tests -v
+python scripts/manage_project.py layout --verbose
 python scripts/manage_project.py check
 python scripts/install_rules.py --help
 python scripts/manage_project.py --help
 ```
 
-测试在临时目录创建仓库，覆盖规则安装与卸载、保护现有内容、中文提交、版本和锁文件同步、失败恢复及本地裸仓库推送。AGENTS.md 约束读取它的编码助手，不是文件监控服务；手工或其他工具修改文件时不会触发后台提交。
+测试在临时目录创建仓库，覆盖规则安装与卸载、保护现有内容、文件规则初始化、新文件出处、命名与位置检查、特殊任务归属、中文提交、版本和锁文件同步、失败恢复及本地裸仓库推送。AGENTS.md 约束读取它的编码助手，不是文件监控服务；手工或其他工具修改文件时不会触发后台提交。
 
 ## 规范依据与许可
 
