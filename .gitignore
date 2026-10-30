@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.venv/
+.axiom-manager/backups/
+.axiom-manager-install.lock
+*.bak-*

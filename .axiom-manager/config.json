@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "auto_push": false,
+  "remote": "origin",
+  "branch": null,
+  "checks": [
+    ["{python}", "-m", "unittest", "discover", "-s", "tests", "-v"]
+  ],
+  "check_timeout_seconds": 300,
+  "version_file": "VERSION",
+  "sync_version_files": []
+}
